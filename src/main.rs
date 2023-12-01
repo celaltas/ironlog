@@ -30,5 +30,14 @@ fn main() {
     ));
 
     write_to_file(&logs, path.clone());
-    let _ = read_from_file(path.clone());
+    let logs = match read_from_file(path.clone()){
+        Ok(res) => res,
+        Err(e) => panic!("{}", e),
+    
+    };
+
+    logs.iter().for_each(|x| println!("{}", x));
+
+
+
 }

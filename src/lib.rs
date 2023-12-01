@@ -1,11 +1,14 @@
+use bincode;
+use bincode::Error;
 use checksum::crc32::Crc32;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use uuid::Uuid;
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub enum Operation {
     Insert,
     Update,
@@ -22,6 +25,7 @@ impl fmt::Display for Operation {
     }
 }
 
+#[derive(Deserialize, Serialize)]
 pub struct WalEntry {
     pub key: String,
     pub value: String,
@@ -65,6 +69,14 @@ impl WalEntry {
             checksum,
         }
     }
+
+    fn to_bytes(&self) -> Result<Vec<u8>, Error> {
+        bincode::serialize(self)
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<WalEntry, Error> {
+        bincode::deserialize(bytes)
+    }
 }
 
 pub fn write_to_file(logs: &[WalEntry], path: String) {
@@ -73,24 +85,29 @@ pub fn write_to_file(logs: &[WalEntry], path: String) {
         Err(error) => panic!("Problem opening the data file: {:?}", error),
     };
     for log in logs.iter() {
-        let buf = log.to_string();
-        if let Err(error) = file.write_all(buf.as_bytes()) {
+        let serialized_entry = match log.to_bytes() {
+            Ok(bytes) => bytes,
+            Err(error) => panic!("Problem serializing entry: {:?}", error),
+        };
+        if let Err(error) = file.write_all(&serialized_entry) {
             eprintln!("Error writing to file: {:?}", error);
         }
     }
 }
 
 pub fn read_from_file(path: String) -> Result<Vec<WalEntry>, &'static str> {
-    let logs: Vec<WalEntry> = Vec::new();
+    let mut logs: Vec<WalEntry> = Vec::new();
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) => panic!("Problem opening the data file: {:?}", error),
     };
     let mut reader = BufReader::new(file);
-    let mut log_string = String::new();
-    while reader.read_line(&mut log_string).unwrap() > 0 {
-        print!("{}", log_string);
-        log_string.clear();
-    }
+    let mut deserialized_entry: Vec<u8> = Vec::new();
+    let _ = reader.read_until(b'\n', &mut deserialized_entry);
+    let entry = match WalEntry::from_bytes(&deserialized_entry) {
+        Ok(entry) => entry,
+        Err(error) => panic!("Problem deserializing entry: {:?}", error),
+    };
+    logs.push(entry);
     Ok(logs)
 }
