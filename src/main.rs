@@ -1,8 +1,12 @@
-use ironlog::{read_from_file, write_to_file, WalEntry};
+use ironlog::{read_from_file, write_to_file, WalEntry, get_number_of_wal};
+mod config;
+
+
 
 fn main() {
     let mut logs: Vec<WalEntry> = Vec::new();
-    let path = String::from("test.txt");
+    let number_of_wal = get_number_of_wal();
+    let path = format!("wal-{:04}.bin", number_of_wal);
     logs.push(WalEntry::new(
         ironlog::Operation::Insert,
         String::from("name"),
@@ -29,14 +33,14 @@ fn main() {
         String::from("reading"),
     ));
 
-    write_to_file(&logs, path.clone());
-    let logs = match read_from_file(path.clone()){
+    write_to_file(&logs, &path,1350);
+    let logs = match read_from_file(&path){
         Ok(res) => res,
         Err(e) => panic!("{}", e),
     
     };
 
-    logs.iter().for_each(|x| println!("{}", x));
+    logs.iter().for_each(|x| print!("{}", x));
 
 
 
