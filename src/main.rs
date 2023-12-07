@@ -1,5 +1,17 @@
-use ironlog::{read_from_file, write_to_file, WalEntry, get_number_of_wal};
+use ironlog::{read_from_file, write_to_file, WalEntry, get_number_of_wal, flush_all_logs};
+use eventual::Timer;
 mod config;
+mod flush;
+use std::time::Duration;
+
+
+struct Postgresql{}
+impl ironlog::flush::Flusher for Postgresql {
+    fn flush(&mut self, entry: WalEntry) -> std::io::Result<()> {
+        println!("{} is flushed", entry);
+        Ok(())
+    }
+}
 
 
 
@@ -41,6 +53,18 @@ fn main() {
     };
 
     logs.iter().for_each(|x| print!("{}", x));
+
+
+
+
+    let mut postgres = Postgresql{};
+    let config = config::WalConfig::new(Duration::new(30, 0), 1024);
+    let timer = Timer::new();
+    let ticks = timer.interval_ms(config.flush_interval.as_millis() as u32).iter();
+
+    for _ in ticks {
+        flush_all_logs(".", &mut postgres)
+    }
 
 
 

@@ -8,7 +8,11 @@ use std::fs::OpenOptions;
 use std::io;
 use std::io::Read;
 use std::io::Write;
+use std::path::PathBuf;
 use uuid::Uuid;
+pub mod flush;
+use flush::Flusher;
+use std::fs;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Operation {
@@ -39,9 +43,9 @@ pub struct WalEntry {
 
 impl fmt::Display for WalEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
+        writeln!(
             f,
-            "{}-{}-{:?}-{}-{}-{}\n",
+            "{}-{}-{:?}-{}-{}-{}",
             self.transaction_id,
             self.timestamp,
             self.operation,
@@ -81,7 +85,7 @@ impl WalEntry {
     }
 }
 
-pub fn write_to_file(logs: &[WalEntry], path: &str, max_log_size:u64) -> Result<(), io::Error> {
+pub fn write_to_file(logs: &[WalEntry], path: &str, max_log_size: u64) -> Result<(), io::Error> {
     let mut file = OpenOptions::new().append(true).create(true).open(path)?;
 
     for log in logs {
@@ -93,18 +97,16 @@ pub fn write_to_file(logs: &[WalEntry], path: &str, max_log_size:u64) -> Result<
             }
         };
 
-        if let Some(file_size) = get_file_size(&file){
-            if file_size + serialized_entry.len() as u64 >max_log_size{
+        if let Some(file_size) = get_file_size(&file) {
+            if file_size + serialized_entry.len() as u64 > max_log_size {
                 rotate_log_file(&mut file, path)?;
             }
         }
 
         if let Err(error) = file.write_all(&serialized_entry) {
             eprintln!("Error writing to file: {:?}", error);
-        } else {
-            if let Err(error) = file.write_all(b"\n") {
-                eprintln!("Error writing newline to file: {:?}", error);
-            }
+        } else if let Err(error) = file.write_all(b"\n") {
+            eprintln!("Error writing newline to file: {:?}", error);
         }
     }
 
@@ -127,66 +129,83 @@ pub fn read_from_file(path: &str) -> Result<Vec<WalEntry>, &'static str> {
 
     let mut a: Vec<WalEntry> = Vec::new();
     for line in lines {
-        if !line.is_empty() {
-            let log = WalEntry::from_bytes(line).unwrap();
-            a.push(log);
+        match WalEntry::from_bytes(line) {
+            Ok(log) => a.push(log),
+            Err(_) => {
+                eprintln!("Error parsing log entry");
+                continue;
+            }
         }
     }
-
     Ok(a)
 }
 
-// pub fn apply_changes_from_log(path: &str) -> Result<(), io::Error> {
-//     let file = File::open(path)?;
+pub fn flush_all_logs(wal_folder: &str, flusher: &mut impl Flusher) {
+    match get_all_log_files(wal_folder) {
+        Ok(paths) => {
+            for path in paths {
+                if let Some(p) = path.to_str() {
+                    match read_from_file(p) {
+                        Ok(res) => apply_changes(res, flusher),
+                        Err(err) => println!("Error occured: {}", err),
+                    };
+                }
+            }
+        }
+        Err(err) => println!("Error occured when logs reading..."),
+    };
+}
 
-//     for line in io::BufReader::new(file).lines() {
-//         let serialized_entry = match line {
-//             Ok(serialized_line) => serialized_line,
-//             Err(error) => {
-//                 eprintln!("Error reading log file line: {:?}", error);
-//                 continue; // Skip this line and continue with the next one
-//             }
-//         };
-
-//         let entry: WalEntry = match WalEntry::from_bytes(serialized_entry.as_bytes()) {
-//             Ok(entry) => entry,
-//             Err(error) => {
-//                 eprintln!("Error deserializing log entry: {:?}", error);
-//                 continue; // Skip this entry and continue with the next one
-//             }
-//         };
-
-//         // Apply changes to the database based on the 'entry' variable
-//         // ...
-
-//         // Example: print the deserialized entry
-//         println!("{}", entry);
-//     }
-
-//     Ok(())
-// }
-
-fn get_file_size(file: &File) -> Option<u64> {
-    match file.metadata() {
-        Ok(m) => return Some(m.len()),
-        Err(_) => return None,
+pub fn apply_changes(entries: Vec<WalEntry>, flusher: &mut impl Flusher) {
+    for entry in entries {
+        if verify_checksum(&entry) {
+            let transaction = entry.transaction_id.clone();
+            match flusher.flush(entry) {
+                Ok(_) => println!("Flushing log {} is succesfully", transaction),
+                Err(err) => println!("Flushing log {} is failed, err", err),
+            };
+        } else {
+            println!("The log {} checksum not verified", entry.transaction_id)
+        }
     }
 }
 
-fn rotate_log_file(file: &mut File, path:&str)->Result<(), io::Error>{
+fn get_file_size(file: &File) -> Option<u64> {
+    match file.metadata() {
+        Ok(m) => Some(m.len()),
+        Err(_) => None,
+    }
+}
+
+fn rotate_log_file(file: &mut File, path: &str) -> Result<(), io::Error> {
     let last_number = get_last_number_of_wal(path);
     let new_path = format!("wal-{:04}.bin", last_number);
-    *file = OpenOptions::new().append(true).create(true).open(&new_path)?;
+    *file = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(new_path)?;
     Ok(())
 }
 
-
-pub fn get_number_of_wal()->u32 {
-    return 0;
+pub fn get_number_of_wal() -> u32 {
+    0
 }
 
-pub fn get_last_number_of_wal(path: &str)->u32{
+pub fn get_last_number_of_wal(path: &str) -> u32 {
     let wal_number = &path[4..8];
-    let last_number:u32 = wal_number.parse().unwrap();
-    last_number+1
+    let last_number: u32 = wal_number.parse().unwrap();
+    last_number + 1
+}
+
+fn verify_checksum(entry: &WalEntry) -> bool {
+    true
+}
+
+fn get_all_log_files(path: &str) -> Result<Vec<PathBuf>, io::Error> {
+    let mut files: Vec<PathBuf> = vec![];
+    for entry in fs::read_dir(path)? {
+        let dir = entry?;
+        files.push(dir.path())
+    }
+    Ok(files)
 }

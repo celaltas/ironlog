@@ -10,6 +10,7 @@ chrono = "0.4.31"
 checksum = "0.2.1"
 serde = { version = "1.0", features = ["derive"] }
 bincode = "1.2.1"
+eventual = "0.1.7"
 
 
 [dependencies.uuid]
