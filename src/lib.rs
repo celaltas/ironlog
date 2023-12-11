@@ -1,18 +1,14 @@
-use bincode;
-use bincode::Error;
+use bincode::{self, Error};
 use checksum::crc32::Crc32;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::fs::File;
-use std::fs::OpenOptions;
-use std::io;
-use std::io::Read;
-use std::io::Write;
-use std::path::PathBuf;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
+
 pub mod flush;
 use flush::Flusher;
-use std::fs;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Operation {
@@ -31,7 +27,7 @@ impl fmt::Display for Operation {
     }
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct WalEntry {
     pub key: String,
     pub value: String,
@@ -85,7 +81,7 @@ impl WalEntry {
     }
 }
 
-pub fn write_to_file(logs: &[WalEntry], path: &str, max_log_size: u64) -> Result<(), io::Error> {
+pub fn write_to_file(logs: &[WalEntry], path: &Path, max_log_size: u64) -> Result<(), io::Error> {
     let mut file = OpenOptions::new().append(true).create(true).open(path)?;
 
     for log in logs {
@@ -140,10 +136,10 @@ pub fn read_from_file(path: &str) -> Result<Vec<WalEntry>, &'static str> {
     Ok(a)
 }
 
-pub fn flush_all_logs(wal_folder: &str, flusher: &mut impl Flusher) {
+pub fn flush_all_logs(wal_folder: &Path, flusher: &mut impl Flusher) {
     match get_all_log_files(wal_folder) {
         Ok(paths) => {
-            for path in paths {
+            for path in paths.iter() {
                 if let Some(p) = path.to_str() {
                     match read_from_file(p) {
                         Ok(res) => apply_changes(res, flusher),
@@ -152,7 +148,7 @@ pub fn flush_all_logs(wal_folder: &str, flusher: &mut impl Flusher) {
                 }
             }
         }
-        Err(err) => println!("Error occured when logs reading..."),
+        Err(_) => println!("Error occured when logs reading..."),
     };
 }
 
@@ -177,9 +173,10 @@ fn get_file_size(file: &File) -> Option<u64> {
     }
 }
 
-fn rotate_log_file(file: &mut File, path: &str) -> Result<(), io::Error> {
-    let last_number = get_last_number_of_wal(path);
-    let new_path = format!("wal-{:04}.bin", last_number);
+fn rotate_log_file(file: &mut File, path: &Path) -> Result<(), io::Error> {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let last_number = get_next_number_of_wal(path);
+    let new_path = format!("{}/wal-{:04}.bin", parent.to_str().unwrap(), last_number);
     *file = OpenOptions::new()
         .append(true)
         .create(true)
@@ -187,25 +184,171 @@ fn rotate_log_file(file: &mut File, path: &str) -> Result<(), io::Error> {
     Ok(())
 }
 
-pub fn get_number_of_wal() -> u32 {
+pub fn get_initial_number_of_wal(path: &Path) -> u32 {
+    let mut initial_number: u32 = 0;
+    match get_all_log_files(path) {
+        Ok(logs) => {
+            if logs.as_os_str().is_empty() {
+                return 0;
+            }
+            for log in logs.iter() {
+                if let Some(file_name) = log.to_str() {
+                    if let Some(num) = get_wal_sequence(Path::new(file_name)) {
+                        if initial_number < num {
+                            initial_number = num;
+                        }
+                    }
+                };
+            }
+            initial_number + 1
+        }
+        Err(_) => 0
+    }
+}
+
+pub fn get_next_number_of_wal(path: &Path) -> u32 {
+    if is_wal_file(path) {
+        let file_name = path.file_name().unwrap();
+        if let Some(wal_number) = file_name.to_str().map(|name| &name[4..8]) {
+            return wal_number.parse().unwrap_or(0) + 1;
+        }
+    }
     0
 }
 
-pub fn get_last_number_of_wal(path: &str) -> u32 {
-    let wal_number = &path[4..8];
-    let last_number: u32 = wal_number.parse().unwrap();
-    last_number + 1
-}
-
-fn verify_checksum(entry: &WalEntry) -> bool {
+fn verify_checksum(_entry: &WalEntry) -> bool {
     true
 }
 
-fn get_all_log_files(path: &str) -> Result<Vec<PathBuf>, io::Error> {
-    let mut files: Vec<PathBuf> = vec![];
+fn is_wal_file(file_path: &Path) -> bool {
+    let prefix = "wal-";
+    let suffix = ".bin";
+
+    if let Some(file_name) = file_path.file_name() {
+        if let Some(file_name_str) = file_name.to_str() {
+            if file_name_str.starts_with(prefix) && file_name_str.ends_with(suffix) {
+                let middle = &file_name_str[prefix.len()..(file_name_str.len() - suffix.len())];
+                if middle.chars().all(|c| c.is_numeric()) && middle.len() == 4 {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn get_wal_sequence(path: &Path) -> Option<u32> {
+    let prefix = "wal-";
+    let suffix = ".bin";
+
+    if is_wal_file(path) {
+        let file_name = path.file_name()?.to_str()?;
+        let middle = &file_name[prefix.len()..(file_name.len() - suffix.len())];
+        middle.parse().ok()
+    } else {
+        None
+    }
+}
+
+fn get_all_log_files(path: &Path) -> Result<PathBuf, io::Error> {
+    let mut paths = PathBuf::new();
     for entry in fs::read_dir(path)? {
         let dir = entry?;
-        files.push(dir.path())
+        if let Some(extension) = dir.path().extension() {
+            if extension == "bin" {
+                paths.push(dir.path());
+            }
+        }
     }
-    Ok(files)
+    Ok(paths)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs::read_to_string,
+        path::{Path, PathBuf},
+    };
+    use tempfile::tempdir;
+
+    use crate::*;
+
+    #[test]
+    fn test_get_all_log_files() {
+        let paths: PathBuf = ["./wal-0000.bin"].iter().collect();
+        let path = Path::new(".");
+        let log_file_paths = get_all_log_files(path).unwrap();
+        assert_eq!(paths, log_file_paths)
+    }
+
+    #[test]
+    fn test_is_wal_file() {
+        let path1 = Path::new("wal-0001.bin");
+        let path2 = Path::new("./");
+        let path3 = Path::new("/etc/passwd");
+
+        assert_eq!(true, is_wal_file(path1));
+        assert_eq!(false, is_wal_file(path2));
+        assert_eq!(false, is_wal_file(path3));
+    }
+
+    #[test]
+    fn test_get_next_number_of_wal() {
+        let path1 = Path::new("wal-0000.bin");
+        let path2 = Path::new("wal-0123.bin");
+        let path3 = Path::new("./");
+        let path4 = Path::new("/etc/passwd");
+
+        assert_eq!(1, get_next_number_of_wal(path1));
+        assert_eq!(124, get_next_number_of_wal(path2));
+        assert_eq!(0, get_next_number_of_wal(path3));
+        assert_eq!(0, get_next_number_of_wal(path4));
+    }
+
+    #[test]
+    fn test_rotate_log_file() {
+        let tmp_dir = tempdir().expect("Failed to create temp dir");
+        let file_path = tmp_dir.path().join("wal-0000.bin");
+        let mut tmp_file = File::create(&file_path).expect("Failed to create temp file");
+        writeln!(tmp_file, "Brian was here. Briefly.").expect("Failed to write temp dir");
+        rotate_log_file(&mut tmp_file, &file_path).expect("Rotation failed");
+        let new_file_path = tmp_dir.path().join("wal-0001.bin");
+        assert_eq!(new_file_path.exists(), true);
+        let content_tmp_file = read_to_string(&file_path).expect("failed to read file");
+        let rotated_tmp_file = read_to_string(&new_file_path).expect("failed to read file");
+        assert_eq!("Brian was here. Briefly.\n", content_tmp_file);
+        assert_eq!("", rotated_tmp_file);
+    }
+
+    #[test]
+    fn test_get_file_size() {
+        let tmp_dir = tempdir().expect("Failed to create temp dir");
+        let file_path = tmp_dir.path().join("test_file.txt");
+        let mut tmp_file = File::create(&file_path).expect("Failed to create temp file");
+        let data = "hello world";
+        write!(tmp_file, "{}", data).expect("Failed to write temp file");
+        assert_eq!(get_file_size(&tmp_file).unwrap(), data.len() as u64)
+    }
+
+    #[test]
+    fn test_get_initial_number_of_wal() {
+        let tmp_dir = tempdir().expect("Failed to create temp dir");
+        let init_number = get_initial_number_of_wal(&tmp_dir.path());
+        assert_eq!(init_number, 0);
+
+        let file_path = tmp_dir.path().join("wal-0000.bin");
+        let _ = File::create(&file_path).expect("Failed to create temp file");
+
+        let init_number = get_initial_number_of_wal(&tmp_dir.path());
+        assert_eq!(init_number, 1);
+
+        let file_path = tmp_dir.path().join("wal-0123.bin");
+        let _ = File::create(&file_path).expect("Failed to create temp file");
+
+        let init_number = get_initial_number_of_wal(&tmp_dir.path());
+        assert_eq!(init_number, 124);
+    }
+
+    
+    
 }

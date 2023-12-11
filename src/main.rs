@@ -1,8 +1,8 @@
-use ironlog::{read_from_file, write_to_file, WalEntry, get_number_of_wal, flush_all_logs};
+use ironlog::{read_from_file, write_to_file, WalEntry, flush_all_logs, get_next_number_of_wal};
 use eventual::Timer;
 mod config;
 mod flush;
-use std::time::Duration;
+use std::{time::Duration, path::Path};
 
 
 struct Postgresql{}
@@ -17,7 +17,8 @@ impl ironlog::flush::Flusher for Postgresql {
 
 fn main() {
     let mut logs: Vec<WalEntry> = Vec::new();
-    let number_of_wal = get_number_of_wal();
+    let path = Path::new(".");
+    let number_of_wal = get_next_number_of_wal(path);
     let path = format!("wal-{:04}.bin", number_of_wal);
     logs.push(WalEntry::new(
         ironlog::Operation::Insert,
@@ -45,7 +46,7 @@ fn main() {
         String::from("reading"),
     ));
 
-    write_to_file(&logs, &path,1350);
+    let _ = write_to_file(&logs, Path::new(&path),1350);
     let logs = match read_from_file(&path){
         Ok(res) => res,
         Err(e) => panic!("{}", e),
@@ -63,7 +64,7 @@ fn main() {
     let ticks = timer.interval_ms(config.flush_interval.as_millis() as u32).iter();
 
     for _ in ticks {
-        flush_all_logs(".", &mut postgres)
+        flush_all_logs(Path::new("."), &mut postgres)
     }
 
 
